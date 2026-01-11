@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>AI Forklift Simulation (6-Action Hole Search)</title>
+  <style>
+    html, body { margin:0; height:100%; overflow:hidden; background:#0b1220; }
+    canvas { display:block; }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: #0ff;
+      font-family: monospace;
+      font-size: 12px;
+      background: rgba(0,0,0,0.8);
+      padding: 10px;
+      border-radius: 4px;
+      min-width: 260px;
+      line-height: 1.35;
+    }
+    #info div { margin: 2px 0; }
+    .warn { color: #f80; }
+    .danger { color: #f22; }
+    .ok { color: #4f4; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+<div id="info"></div>
+<script>
+(() => {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1220);
+  scene.fog = new THREE.Fog(0x0b1220, 60, 140);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+
+  const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500);
+  camera.position.set(-30, 25, 30);
+
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.target.set(0, 1, 0);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+  const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+  sun.position.set(25, 35, 20);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -60;
+  sun.shadow.camera.right = 60;
+  sun.shadow.camera.top = 60;
+  sun.shadow.camera.bottom = -60;
+  sun.shadow.bias = -0.0003;
+  scene.add(sun);
+
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(200, 200),
+    new THREE.MeshStandardMaterial({ color: 0x0a1324, roughness: 0.95 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  const grid = new THREE.GridHelper(200, 100, 0x1f3557, 0x111c33);
+  grid.material.opacity = 0.25;
+  grid.material.transparent = true;
+  scene.add(grid);
+
+  const matMetal = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.55, metalness: 0.75 });
+  const matMetal2 = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.7, metalness: 0.65 });
+  const matChrome = new THREE.MeshStandardMaterial({ color: 0xdbe2ea, roughness: 0.18, metalness: 0.9 });
+  const matRubber = new THREE.MeshStandardMaterial({ color: 0x0b0b0b, roughness: 0.95 });
+  const matGlass = new THREE.MeshStandardMaterial({ color: 0x8fb9ff, roughness: 0.1, transparent: true, opacity: 0.22 });
+  const matSeat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.95 });
+  const matHose = new THREE.MeshStandardMaterial({ color: 0x0b0b0b, roughness: 0.95 });
+  const matChain = new THREE.MeshStandardMaterial({ color: 0x2b3442, roughness: 0.65, metalness: 0.55 });
+  const matWood = new THREE.MeshStandardMaterial({ color: 0xc6a06b, roughness: 0.92 });
+  const matWood2 = new THREE.MeshStandardMaterial({ color: 0xb99158, roughness: 0.95 });
+  const matNail = new THREE.MeshStandardMaterial({ color: 0x2a303b, roughness: 0.55, metalness: 0.75 });
+  const matReverse = new THREE.MeshStandardMaterial({ color: 0xff2222, roughness: 0.3, emissive: 0x000000 });
+  const matBeacon = new THREE.MeshBasicMaterial({ color: 0xff6a00 });
+  const matHead = new THREE.MeshBasicMaterial({ color: 0xffffee });
+  const matDriver = new THREE.MeshStandardMaterial({ color: 0x1a2a3a, roughness: 0.85 });
+  const matSkin = new THREE.MeshStandardMaterial({ color: 0xddaa88, roughness: 0.8 });
+  const matHelmet = new THREE.MeshStandardMaterial({ color: 0xffcc00, roughness: 0.4 });
+
+  function mesh(geo, mat, pos = [0, 0, 0], rot = [0, 0, 0]) {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(...pos);
+    m.rotation.set(...rot);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    return m;
+  }
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  class DustSystem {
+    constructor(n = 120) {
+      this.pool = [];
+      const geo = new THREE.SphereGeometry(0.05, 4, 4);
+      for (let i = 0; i < n; i++) {
+        const mat = new THREE.MeshBasicMaterial({ color: 0x887755, transparent: true, opacity: 0 });
+        const p = new THREE.Mesh(geo, mat);
+        p.visible = false;
+        p.userData = { vel: new THREE.Vector3(), life: 0 };
+        scene.add(p);
+        this.pool.push(p);
+      }
+      this.idx = 0;
+    }
+    emit(x, y, z, count = 1) {
+      for (let i = 0; i < count; i++) {
+        const p = this.pool[this.idx];
+        p.position.set(x + (Math.random() - 0.5) * 0.3, y, z + (Math.random() - 0.5) * 0.3);
+        p.visible = true;
+        p.material.opacity = 0.5;
+        p.userData.vel.set((Math.random() - 0.5) * 0.8, Math.random() * 0.5 + 0.2, (Math.random() - 0.5) * 0.8);
+        p.userData.life = 1;
+        this.idx = (this.idx + 1) % this.pool.length;
+      }
+    }
+    update(dt) {
+      for (const p of this.pool) {
+        if (!p.visible) continue;
+        p.userData.life -= dt * 1.5;
+        if (p.userData.life <= 0) { p.visible = false; continue; }
+        p.position.add(p.userData.vel.clone().multiplyScalar(dt));
+        p.userData.vel.y -= dt * 0.5;
+        p.material.opacity = p.userData.life * 0.4;
+      }
+    }
+  }
+  const dust = new DustSystem(150);
+
+  class ExhaustSystem {
+    constructor(n = 60) {
+      this.pool = [];
+      const geo = new THREE.SphereGeometry(0.03, 4, 4);
+      for (let i = 0; i < n; i++) {
+        const mat = new THREE.MeshBasicMaterial({ color: 0x444444, transparent: true, opacity: 0 });
+        const p = new THREE.Mesh(geo, mat);
+        p.visible = false;
+        p.userData = { vel: new THREE.Vector3(), life: 0 };
+        scene.add(p);
+        this.pool.push(p);
+      }
+      this.idx = 0;
+    }
+    emit(x, y, z) {
+      const p = this.pool[this.idx];
+      p.position.set(x, y, z);
+      p.visible = true;
+      p.material.opacity = 0.3;
+      p.userData.vel.set((Math.random() - 0.5) * 0.2, Math.random() * 0.3 + 0.1, (Math.random() - 0.5) * 0.2);
+      p.userData.life = 1;
+      this.idx = (this.idx + 1) % this.pool.length;
+    }
+    update(dt) {
+      for (const p of this.pool) {
+        if (!p.visible) continue;
+        p.userData.life -= dt * 2;
+        if (p.userData.life <= 0) { p.visible = false; continue; }
+        p.position.add(p.userData.vel.clone().multiplyScalar(dt));
+        p.scale.setScalar(1 + (1 - p.userData.life) * 2);
+        p.material.opacity = p.userData.life * 0.25;
+      }
+    }
+  }
+  const exhaust = new ExhaustSystem(60);
+
+  let audioCtx = null;
+  function initAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  function createEngineSound() {
+    if (!audioCtx) return null;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const filter = audioCtx.createBiquadFilter();
+    osc.type = 'sawtooth';
+    osc.frequency.value = 50;
+    filter.type = 'lowpass';
+    filter.frequency.value = 150;
+    gain.gain.value = 0;
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    return { osc, gain, filter };
+  }
+
+  function makeDriver() {
+    const g = new THREE.Group();
+    g.add(mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.38, 10), matDriver, [0, 0.19, 0]));
+    g.add(mesh(new THREE.SphereGeometry(0.10, 10, 8), matSkin, [0, 0.46, 0]));
+    g.add(mesh(new THREE.SphereGeometry(0.12, 10, 8), matHelmet, [0, 0.52, 0], [0.25, 0, 0]));
+    g.add(mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.20, 6), matDriver, [0.10, 0.10, 0.07], [0, 0, -0.5]));
+    g.add(mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.20, 6), matDriver, [0.10, 0.10, -0.07], [0, 0, -0.5]));
+    return g;
+  }
+
+  function makeWheel(radius, width, rimRadius) {
+    const g = new THREE.Group();
+    g.userData.radius = radius;
+    g.add(mesh(new THREE.CylinderGeometry(radius, radius, width, 24), matRubber, [0, 0, 0], [Math.PI / 2, 0, 0]));
+    g.add(mesh(new THREE.CylinderGeometry(rimRadius, rimRadius, width * 0.95, 16), matChrome, [0, 0, 0], [Math.PI / 2, 0, 0]));
+    g.add(mesh(new THREE.CylinderGeometry(rimRadius * 0.3, rimRadius * 0.3, width * 1.02, 10), matMetal, [0, 0, 0], [Math.PI / 2, 0, 0]));
+    return g;
+  }
+
+  function makeFork() {
+    const g = new THREE.Group();
+    const baseLen = 1.15, extLen = 1.35;
+    const tipX = 0.62 + baseLen + extLen + 0.16;
+
+    g.add(mesh(new THREE.BoxGeometry(baseLen, 0.055, 0.14), matMetal2, [0.62, 0.04, 0]));
+    g.add(mesh(new THREE.BoxGeometry(extLen, 0.045, 0.12), matMetal2, [0.62 + baseLen * 0.5 + extLen * 0.5 - 0.02, 0.04, 0]));
+    g.add(mesh(new THREE.BoxGeometry(0.20, 0.04, 0.10), matMetal2, [0.62 + baseLen * 0.5 + extLen + 0.06, 0.04, 0]));
+    g.add(mesh(new THREE.BoxGeometry(baseLen + extLen + 0.10, 0.012, 0.10), matMetal, [0.60 + (baseLen + extLen) * 0.5, 0.015, 0]));
+
+    const tip = new THREE.Object3D();
+    tip.position.set(tipX, 0.04, 0);
+    g.add(tip);
+    g.userData.tip = tip;
+
+    return g;
+  }
+
+  function makeTube(pts, r = 0.012) {
+    const curve = new THREE.CatmullRomCurve3(pts);
+    const geo = new THREE.TubeGeometry(curve, 32, r, 8, false);
+    const m = new THREE.Mesh(geo, matHose);
+    m.castShadow = m.receiveShadow = true;
+    return m;
+  }
+
+  function createForklift(color) {
+    const paint = new THREE.MeshStandardMaterial({ color, roughness: 0.25, metalness: 0.35 });
+    const paint2 = new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.8).getHex(), roughness: 0.35, metalness: 0.25 });
+
+    const root = new THREE.Group();
+    const chassis = new THREE.Group();
+    root.add(chassis);
+
+    chassis.add(mesh(new THREE.BoxGeometry(2.65, 0.32, 1.25), matMetal2, [0, 0.35, 0]));
+    chassis.add(mesh(new THREE.BoxGeometry(2.25, 0.18, 1.05), matMetal, [-0.1, 0.18, 0]));
+    chassis.add(mesh(new THREE.BoxGeometry(1.45, 0.55, 1.2), paint, [-0.55, 0.75, 0]));
+    chassis.add(mesh(new THREE.BoxGeometry(0.75, 0.22, 1.12), paint2, [-1.02, 1.05, 0]));
+    chassis.add(mesh(new THREE.CylinderGeometry(0.55, 0.55, 1.2, 24, 1, false, Math.PI / 2, Math.PI), paint, [-1.28, 0.76, 0], [0, Math.PI / 2, Math.PI / 2]));
+
+    for (let i = 0; i < 6; i++) chassis.add(mesh(new THREE.BoxGeometry(0.08, 0.46, 1.05), matMetal2, [-1.55 + i * 0.07, 0.72, 0]));
+
+    chassis.add(mesh(new THREE.BoxGeometry(0.62, 0.08, 0.38), matMetal2, [-0.25, 0.38, 0.68]));
+    chassis.add(mesh(new THREE.BoxGeometry(0.62, 0.08, 0.38), matMetal2, [-0.25, 0.38, -0.68]));
+    chassis.add(mesh(new THREE.BoxGeometry(0.55, 0.10, 0.55), matSeat, [-0.15, 1.05, 0]));
+    chassis.add(mesh(new THREE.BoxGeometry(0.12, 0.55, 0.55), matSeat, [-0.38, 1.32, 0]));
+
+    const driver = makeDriver();
+    driver.position.set(-0.15, 1.05, 0);
+    chassis.add(driver);
+
+    chassis.add(mesh(new THREE.BoxGeometry(0.45, 0.26, 0.55), matMetal2, [0.35, 0.95, 0]));
+    chassis.add(mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.65, 12), matMetal2, [0.38, 1.15, 0], [0, 0, -0.55]));
+    chassis.add(mesh(new THREE.TorusGeometry(0.17, 0.02, 8, 20), matMetal, [0.55, 1.38, 0], [Math.PI / 2, 0, -0.55]));
+
+    const cage = new THREE.Group();
+    chassis.add(cage);
+    [[0.10, 0.58], [0.10, -0.58], [-0.85, 0.58], [-0.85, -0.58]].forEach(([x, z]) => {
+      cage.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.55, 10), matMetal, [x, 1.95, z]));
+    });
+    cage.add(mesh(new THREE.BoxGeometry(1.25, 0.05, 1.25), matMetal2, [-0.35, 2.73, 0]));
+    for (let i = 0; i < 6; i++) cage.add(mesh(new THREE.BoxGeometry(1.25, 0.02, 0.02), matMetal, [-0.35, 2.73, -0.55 + i * 0.22]));
+    chassis.add(mesh(new THREE.BoxGeometry(1.15, 0.85, 0.02), matGlass, [-0.35, 2.05, 0]));
+
+    const beacon = mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.16, 14), matBeacon, [-0.35, 2.88, 0]);
+    beacon.castShadow = false;
+    chassis.add(beacon);
+    const beaconLight = new THREE.PointLight(0xff6a00, 0.8, 6);
+    beaconLight.position.set(-0.35, 2.95, 0);
+    chassis.add(beaconLight);
+
+    chassis.add(mesh(new THREE.BoxGeometry(0.12, 0.10, 0.10), matHead, [1.25, 0.70, 0.42]));
+    chassis.add(mesh(new THREE.BoxGeometry(0.12, 0.10, 0.10), matHead, [1.25, 0.70, -0.42]));
+
+    const revMat = matReverse.clone();
+    const revL = mesh(new THREE.BoxGeometry(0.10, 0.06, 0.04), revMat, [-1.58, 0.78, 0.36]);
+    const revR = mesh(new THREE.BoxGeometry(0.10, 0.06, 0.04), revMat, [-1.58, 0.78, -0.36]);
+    revL.castShadow = revR.castShadow = false;
+    chassis.add(revL, revR);
+
+    const frontX = 0.85, frontY = 0.36, frontZ = 0.62;
+    const rearX = -0.95, rearY = 0.42, rearZ = 0.62;
+
+    const steerL = new THREE.Group();
+    steerL.position.set(frontX, frontY, frontZ);
+    chassis.add(steerL);
+    const steerR = new THREE.Group();
+    steerR.position.set(frontX, frontY, -frontZ);
+    chassis.add(steerR);
+
+    const wFL = makeWheel(0.36, 0.25, 0.22);
+    steerL.add(wFL);
+    const wFR = makeWheel(0.36, 0.25, 0.22);
+    steerR.add(wFR);
+
+    const wRL = makeWheel(0.42, 0.28, 0.24);
+    wRL.position.set(rearX, rearY, rearZ);
+    chassis.add(wRL);
+    const wRR = makeWheel(0.42, 0.28, 0.24);
+    wRR.position.set(rearX, rearY, -rearZ);
+    chassis.add(wRR);
+
+    chassis.add(mesh(new THREE.BoxGeometry(0.65, 0.10, 1.18), matMetal2, [-0.95, 0.50, 0]));
+    chassis.add(mesh(new THREE.BoxGeometry(0.55, 0.08, 1.08), matMetal2, [0.85, 0.42, 0]));
+
+    const mast = new THREE.Group();
+    mast.position.set(1.35, 0, 0);
+    chassis.add(mast);
+
+    const railZ = 0.38;
+    mast.add(mesh(new THREE.BoxGeometry(0.12, 4.9, 0.08), matMetal, [0, 2.45, railZ]));
+    mast.add(mesh(new THREE.BoxGeometry(0.12, 4.9, 0.08), matMetal, [0, 2.45, -railZ]));
+    mast.add(mesh(new THREE.BoxGeometry(0.06, 4.6, 0.10), matMetal2, [-0.08, 2.30, 0.32]));
+    mast.add(mesh(new THREE.BoxGeometry(0.06, 4.6, 0.10), matMetal2, [-0.08, 2.30, -0.32]));
+    mast.add(mesh(new THREE.BoxGeometry(0.22, 0.10, 0.90), matMetal2, [-0.05, 0.60, 0]));
+    mast.add(mesh(new THREE.BoxGeometry(0.18, 0.10, 0.90), matMetal2, [-0.05, 4.55, 0]));
+
+    const sprocket = new THREE.TorusGeometry(0.10, 0.02, 8, 16);
+    [[4.72, railZ], [4.72, -railZ], [0.78, railZ], [0.78, -railZ]].forEach(([y, z]) => {
+      mast.add(mesh(sprocket, matMetal2, [-0.02, y, z], [Math.PI / 2, 0, 0]));
+    });
+    mast.add(mesh(new THREE.BoxGeometry(0.02, 3.76, 0.06), matChain, [-0.02, 2.75, railZ]));
+    mast.add(mesh(new THREE.BoxGeometry(0.02, 3.76, 0.06), matChain, [-0.02, 2.75, -railZ]));
+
+    mast.add(mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.55, 14), matChrome, [-0.10, 1.55, 0]));
+    const hydRod = mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.25, 12), matChrome, [-0.10, 2.15, 0]);
+    mast.add(hydRod);
+
+    const carriage = new THREE.Group();
+    mast.add(carriage);
+
+    carriage.add(mesh(new THREE.BoxGeometry(0.07, 1.10, 0.92), matMetal2, [0, 0.72, 0]));
+    for (let i = 0; i < 7; i++) carriage.add(mesh(new THREE.BoxGeometry(0.03, 0.03, 0.88), matMetal, [0.03, 0.30 + i * 0.14, 0]));
+
+    const forkCarrier = new THREE.Group();
+    carriage.add(forkCarrier);
+    forkCarrier.position.set(0, -0.09, 0);
+    forkCarrier.add(mesh(new THREE.BoxGeometry(0.22, 0.45, 0.95), matMetal, [0.14, 0.18, 0]));
+
+    const sideShift = new THREE.Group();
+    sideShift.position.set(0.18, 0.12, 0);
+    forkCarrier.add(sideShift);
+    sideShift.add(mesh(new THREE.BoxGeometry(0.35, 0.18, 1.05), matMetal2, [0, 0, 0]));
+
+    const forks = new THREE.Group();
+    sideShift.add(forks);
+
+    const forkL = makeFork();
+    const forkR = makeFork();
+    forks.add(forkL, forkR);
+    forkL.position.z = 0.30;
+    forkR.position.z = -0.30;
+
+    const liftHoseL = new THREE.Mesh(new THREE.BufferGeometry(), matHose);
+    const liftHoseR = new THREE.Mesh(new THREE.BufferGeometry(), matHose);
+    liftHoseL.castShadow = liftHoseR.castShadow = true;
+    mast.add(liftHoseL, liftHoseR);
+
+    // ===== Front Sensor Volume (visual only) =====
+    const SENSOR_RANGE = 3.4;
+    const SENSOR_W = 1.60;
+    const SENSOR_H = 0.55;
+
+    const sensorBox = new THREE.Mesh(
+      new THREE.BoxGeometry(SENSOR_RANGE, SENSOR_H, SENSOR_W),
+      new THREE.MeshBasicMaterial({ color: 0x00ff66, wireframe: true, transparent: true, opacity: 0.16 })
+    );
+    sensorBox.castShadow = false;
+    sensorBox.receiveShadow = false;
+    sensorBox.position.set(2.10 + SENSOR_RANGE * 0.5, 0.18, 0);
+    forks.add(sensorBox);
+
+    const sensorLight = new THREE.PointLight(0x00ff66, 0, 6);
+    sensorLight.position.set(2.10 + SENSOR_RANGE * 0.75, 0.35, 0);
+    forks.add(sensorLight);
+
+    scene.add(root);
+
+    return {
+      root, chassis, mast, carriage, sideShift, forks, forkL, forkR,
+      wheels: { fl: wFL, fr: wFR, rl: wRL, rr: wRR },
+      steerPivots: { l: steerL, r: steerR },
+      hydRod, liftHoseL, liftHoseR, beaconLight,
+      revLights: [revL, revR], revMat,
+      driver, color,
+      sensor: { range: SENSOR_RANGE, w: SENSOR_W, h: SENSOR_H, box: sensorBox, light: sensorLight }
+    };
+  }
+
+  function makePallet(l = 1.20, w = 1.00, weight = 100) {
+    const g = new THREE.Group();
+    const H = 0.145;
+    const tDeck = 0.018, tBottom = 0.018, hStringer = 0.085;
+    const yBottom = tBottom / 2;
+    const yStringer = tBottom + hStringer / 2;
+    const yTopDeck = tBottom + hStringer + tDeck / 2;
+
+    const railW = 0.09;
+    [-w / 2 + railW / 2, 0, w / 2 - railW / 2].forEach((z, i) => {
+      g.add(mesh(new THREE.BoxGeometry(l, hStringer, railW), i === 1 ? matWood2 : matWood, [0, yStringer, z]));
+    });
+
+    for (let i = 0; i < 3; i++) {
+      const z = -w * 0.35 + i * w * 0.35;
+      g.add(mesh(new THREE.BoxGeometry(l * 0.92, tBottom, 0.12), i % 2 ? matWood2 : matWood, [0, yBottom, z]));
+    }
+
+    for (let i = 0; i < 7; i++) {
+      const z = -w / 2 + (w / 8) * (i + 1);
+      g.add(mesh(new THREE.BoxGeometry(l * 0.96, tDeck, 0.095), i % 3 === 0 ? matWood2 : matWood, [0, yTopDeck, z]));
+    }
+
+    const nailGeo = new THREE.CylinderGeometry(0.004, 0.004, 0.002, 6);
+    const nailY = yTopDeck + tDeck / 2 + 0.001;
+    for (let xi = -1; xi <= 1; xi++) {
+      for (let zi = -3; zi <= 3; zi++) {
+        g.add(mesh(nailGeo, matNail, [xi * l * 0.28, nailY, zi * w * 0.12], [Math.PI / 2, 0, 0]));
+      }
+    }
+
+    // ===== Fork pockets (two entrances) in pallet local coordinates =====
+    // Pallet local axes: X=length, Z=width. We assume entry from -X side.
+    const entryX = -l * 0.5;
+    const pocketY = tBottom + 0.035; // hole height band
+    const pocketZ = w * 0.25;        // left/right centers
+    const pocketInsideX = entryX + 0.32; // where fork tip should end up inside
+    const pocketTol = { x: 0.12, y: 0.05, z: 0.11 };
+
+    const pocketMarkers = new THREE.Group();
+    pocketMarkers.visible = false;
+    const mk = (x, y, z) => {
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(0.03, 10, 8),
+        new THREE.MeshBasicMaterial({ color: 0x66ffcc })
+      );
+      m.position.set(x, y, z);
+      return m;
+    };
+    pocketMarkers.add(mk(pocketInsideX, pocketY, pocketZ));
+    pocketMarkers.add(mk(pocketInsideX, pocketY, -pocketZ));
+    g.add(pocketMarkers);
+
+    g.userData = {
+      L: l, W: w, H, weight,
+      carried: false, stacked: 0,
+      pockets: [
+        new THREE.Vector3(pocketInsideX, pocketY, pocketZ),
+        new THREE.Vector3(pocketInsideX, pocketY, -pocketZ)
+      ],
+      pocketEntryX: entryX,
+      pocketTol,
+      pocketMarkers
+    };
+    return g;
+  }
+
+  const pallets = [];
+  const obstacles = [];
+  const dropZones = [
+    new THREE.Vector3(-15, 0, -15),
+    new THREE.Vector3(15, 0, -15),
+    new THREE.Vector3(-15, 0, 15),
+    new THREE.Vector3(15, 0, 15)
+  ];
+
+  function spawnPallet(x, z, rot = 0, stackLevel = 0) {
+    const p = makePallet(1.20, 1.00, 150);
+    p.position.set(x, p.userData.H / 2 + stackLevel * p.userData.H, z);
+    p.rotation.y = rot;
+    p.userData.stacked = stackLevel;
+    scene.add(p);
+    pallets.push(p);
+    return p;
+  }
+
+  function spawnObstacle(x, z, w, h, d) {
+    const m = mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color: 0x334455, roughness: 0.85 }), [x, h / 2, z]);
+    scene.add(m);
+    obstacles.push({ mesh: m, pos: new THREE.Vector3(x, 0, z), size: new THREE.Vector3(w, h, d) });
+  }
+
+  spawnPallet(8, 3, 0.1);
+  spawnPallet(10, -2, -0.2);
+  spawnPallet(-6, 8, 0.3);
+  spawnPallet(-8, -5, -0.1);
+  spawnPallet(5, -10, 0.15);
+  spawnPallet(-10, -10, 0.0);
+  spawnPallet(12, 8, -0.25);
+  spawnPallet(-5, 12, 0.4);
+
+  spawnObstacle(0, 0, 2.5, 1.5, 2.5);
+  spawnObstacle(-12, 3, 3, 2, 1.5);
+  spawnObstacle(6, -5, 1.5, 1, 3);
+  spawnObstacle(-3, -8, 2, 1.2, 2);
+
+  const liftMax = 3.35;
+  const tiltMin = THREE.MathUtils.degToRad(-10);
+  const tiltMax = THREE.MathUtils.degToRad(8);
+  const EPS_GROUND = 0.002;
+  const FORK_MIN_Y = -0.081;
+  const FORK_MAX_X = 2.90;
+
+  function requiredLiftMin(tiltZ) {
+    const c = Math.cos(tiltZ), s = Math.sin(tiltZ);
+    return Math.max(EPS_GROUND - FORK_MIN_Y, EPS_GROUND - (FORK_MIN_Y * c + FORK_MAX_X * s));
+  }
+
+  function updateAxis(dt, now, vel, target, accel, maxVel) {
+    const err = target - now;
+    let vDes = clamp(err * 3, -maxVel, maxVel);
+    vel += clamp(vDes - vel, -accel * dt, accel * dt);
+    now += vel * dt;
+    if (Math.abs(err) < 0.002 && Math.abs(vel) < 0.01) { now = target; vel = 0; }
+    return { now, vel };
+  }
+
+  function rebuildHoses(fl, liftY) {
+    const yEnd = liftY + 0.55;
+    [[fl.liftHoseL, 0.22], [fl.liftHoseR, -0.22]].forEach(([m, zOff]) => {
+      const pts = [
+        new THREE.Vector3(0.18, 0.92, zOff),
+        new THREE.Vector3(0.10, 1.20, zOff * 1.4),
+        new THREE.Vector3(0.12, 2.10, zOff * 1.5),
+        new THREE.Vector3(0.14, yEnd, zOff * 1.4)
+      ];
+      const g = makeTube(pts, 0.013).geometry;
+      m.geometry.dispose();
+      m.geometry = g;
+    });
+  }
+
+  function normalizeAngle(a) {
+    while (a > Math.PI) a -= Math.PI * 2;
+    while (a < -Math.PI) a += Math.PI * 2;
+    return a;
+  }
+
+  function forwardFromYaw(yaw) {
+    return new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+  }
+
+  function rightFromYaw(yaw) {
+    return new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  }
+
+  class ForkliftAI {
+    constructor(fl, id) {
+      this.fl = fl;
+      this.id = id;
+
+      this.state = 'IDLE';
+      this.target = null;
+      this.dropZone = null;
+
+      this.timer = 0;
+
+      this.liftY = 0.5;
+      this.liftVel = 0;
+      this.liftTarget = 0.5;
+
+      this.tiltZ = 0;
+      this.tiltVel = 0;
+      this.tiltTarget = 0;
+
+      this.sideShiftZ = 0;
+      this.sideShiftVel = 0;
+      this.sideShiftTarget = 0;
+
+      this.forkSpread = 0.30;
+
+      this.yaw = 0;
+      this.speed = 0;
+      this.steer = 0;
+      this.rollFront = 0;
+      this.rollRear = 0;
+
+      this.tipRisk = 0;
+      this.friction = 1.0;
+      this.warningLevel = 0;
+
+      // sensor/score outputs
+      this.sensorHit = false;
+      this.sensorDist = Infinity;
+      this.holeScore = Infinity;
+      this.holeAngErr = Infinity;
+      this.holeLatErr = Infinity;
+      this.holeLongErr = Infinity;
+      this.holeHeightErr = Infinity;
+
+      // 6-action search
+      this.searchAction = 'NONE';
+      this.searchLock = 0;
+
+      this.engineSound = createEngineSound();
+
+      this.applyLift();
+      this.applyTilt();
+      this.applySideShift();
+      rebuildHoses(fl, this.liftY);
+    }
+
+    applyTilt() {
+      this.fl.mast.rotation.z = clamp(this.tiltZ, tiltMin, tiltMax);
+    }
+
+    applyLift() {
+      const dynMin = requiredLiftMin(this.tiltZ);
+      const y = clamp(this.liftY, dynMin, liftMax);
+      this.fl.carriage.position.y = y;
+      this.fl.hydRod.position.y = 2.15 + (y - dynMin) * 0.4;
+      this.liftY = y;
+    }
+
+    applySideShift() {
+      const z = clamp(this.sideShiftZ, -0.22, 0.22);
+      this.fl.sideShift.position.z = z;
+      this.sideShiftZ = z;
+    }
+
+    setState(s) {
+      this.state = s;
+      this.timer = 0;
+      this.searchAction = 'NONE';
+      this.searchLock = 0;
+    }
+
+    findNearestPallet() {
+      let best = null, minD = Infinity;
+      const pos = this.fl.root.position;
+      for (const p of pallets) {
+        if (p.userData.carried) continue;
+        const d = pos.distanceTo(p.position);
+        if (d < minD) { minD = d; best = p; }
+      }
+      return best;
+    }
+
+    getDropZone() {
+      let best = null, minD = Infinity;
+      const pos = this.fl.root.position;
+      for (const dz of dropZones) {
+        let blocked = false;
+        for (const p of pallets) {
+          if (p.userData.carried) continue;
+          if (p.position.distanceTo(dz) < 2) { blocked = true; break; }
+        }
+        if (blocked) continue;
+        const d = pos.distanceTo(dz);
+        if (d < minD) { minD = d; best = dz; }
+      }
+      return best || dropZones[Math.floor(Math.random() * dropZones.length)];
+    }
+
+    checkCollision(newPos) {
+      for (const o of obstacles) {
+        const dx = Math.abs(newPos.x - o.pos.x);
+        const dz = Math.abs(newPos.z - o.pos.z);
+        if (dx < o.size.x / 2 + 1.5 && dz < o.size.z / 2 + 1.5) return true;
+      }
+      for (const ai of aiList) {
+        if (ai === this) continue;
+        if (newPos.distanceTo(ai.fl.root.position) < 4) return true;
+      }
+      for (const p of pallets) {
+        if (p.userData.carried) continue;
+        if (p === this.target) continue;
+        if (newPos.distanceTo(p.position) < 1.8) return true;
+      }
+      return false;
+    }
+
+    avoidAngle(targetAng) {
+      const pos = this.fl.root.position;
+      let best = targetAng, minCost = Infinity;
+
+      for (let off = -Math.PI * 0.6; off <= Math.PI * 0.6; off += Math.PI / 16) {
+        const ang = targetAng + off;
+        let cost = Math.abs(off) * 0.3;
+
+        const test = pos.clone();
+        test.x += Math.cos(ang) * 3;
+        test.z -= Math.sin(ang) * 3;
+
+        for (const o of obstacles) {
+          const d = test.distanceTo(o.pos);
+          if (d < o.size.x + 2) cost += (o.size.x + 3 - d) * 2;
+        }
+        for (const ai of aiList) {
+          if (ai === this) continue;
+          const d = test.distanceTo(ai.fl.root.position);
+          if (d < 5) cost += (6 - d);
+        }
+        for (const p of pallets) {
+          if (p.userData.carried || p === this.target) continue;
+          const d = test.distanceTo(p.position);
+          if (d < 2.5) cost += (3 - d);
+        }
+
+        if (cost < minCost) { minCost = cost; best = ang; }
+      }
+      return best;
+    }
+
+    // ===== front sensor: any pallet ahead (coarse) =====
+    sensePalletAhead() {
+      this.fl.root.updateMatrixWorld(true);
+
+      // coarse AABB in forklift local: x>0 and within sensor width
+      const range = this.fl.sensor.range;
+      const halfW = this.fl.sensor.w * 0.5;
+
+      let best = null;
+      let bestDist = Infinity;
+
+      for (const p of pallets) {
+        if (p.userData.carried) continue;
+        const local = p.position.clone();
+        this.fl.root.worldToLocal(local);
+
+        if (local.x <= 0) continue;
+        if (local.x > range) continue;
+
+        const zTol = halfW + (p.userData?.W ? p.userData.W * 0.55 : 0.55);
+        if (Math.abs(local.z) > zTol) continue;
+
+        if (local.x < bestDist) {
+          bestDist = local.x;
+          best = p;
+        }
+      }
+
+      this.sensorHit = !!best;
+      this.sensorDist = best ? bestDist : Infinity;
+
+      const light = this.fl.sensor.light;
+      const box = this.fl.sensor.box;
+      if (light && box) {
+        if (best) {
+          const k = clamp(1 - bestDist / range, 0, 1);
+          const close = bestDist < 0.65;
+          light.color.setHex(close ? 0xff3333 : 0x00ff66);
+          light.intensity = 0.25 + k * 1.35;
+          box.material.color.setHex(close ? 0xff3333 : 0x00ff66);
+          box.material.opacity = close ? 0.26 : 0.16;
+        } else {
+          light.intensity = 0;
+          box.material.opacity = 0.10;
+          box.material.color.setHex(0x00ff66);
+        }
+      }
+    }
+
+    // ===== hole score sensor: compute from fork tips to pallet pocket targets =====
+    computeHoleScore(pallet, simPos, simYaw, simSideShiftZ, simLiftY, simTiltZ) {
+      // approximate fork tip world positions using actual transform if current, or simulated using yaw/pos + offsets
+      // We use the fork tip markers (forkL.userData.tip / forkR.userData.tip) for current, then adjust by sim deltas.
+      // For simulation, we build tips in world using simYaw and simPos plus offsets measured from current.
+      const root = this.fl.root;
+      root.updateMatrixWorld(true);
+
+      // measure current offsets of tips in root-local (so simulation is consistent)
+      const tipWL = new THREE.Vector3();
+      const tipWR = new THREE.Vector3();
+      this.fl.forkL.userData.tip.getWorldPosition(tipWL);
+      this.fl.forkR.userData.tip.getWorldPosition(tipWR);
+
+      const tipLL = tipWL.clone(); root.worldToLocal(tipLL);
+      const tipLR = tipWR.clone(); root.worldToLocal(tipLR);
+
+      // simulate sideShift/lift/tilt: apply only on local z/y approx
+      const sideShiftDelta = simSideShiftZ - this.sideShiftZ;
+      const liftDelta = simLiftY - this.liftY;
+      const tiltDelta = simTiltZ - this.tiltZ;
+
+      // local tip points in simulated root-local
+      const simTipLocalL = tipLL.clone();
+      const simTipLocalR = tipLR.clone();
+
+      simTipLocalL.z += sideShiftDelta;
+      simTipLocalR.z += sideShiftDelta;
+      simTipLocalL.y += liftDelta;
+      simTipLocalR.y += liftDelta;
+
+      // crude tilt effect: rotate local x/y around z-axis at mast; approximate by rotating around root origin with small factor
+      // (kept mild to avoid instability)
+      const tiltK = 0.65;
+      const cz = Math.cos(tiltDelta * tiltK), sz = Math.sin(tiltDelta * tiltK);
+      const rotZ = (v) => {
+        const x = v.x, y = v.y;
+        v.x = x * cz - y * sz;
+        v.y = x * sz + y * cz;
+        return v;
+      };
+      rotZ(simTipLocalL);
+      rotZ(simTipLocalR);
+
+      // convert simulated local tips to world using simYaw and simPos (ignore current root rotation)
+      const fwd = forwardFromYaw(simYaw);
+      const right = rightFromYaw(simYaw);
+
+      const worldFromSimLocal = (vLocal) => {
+        return new THREE.Vector3()
+          .copy(simPos)
+          .addScaledVector(fwd, vLocal.x)
+          .addScaledVector(new THREE.Vector3(0,1,0), vLocal.y)
+          .addScaledVector(right, vLocal.z);
+      };
+
+      const simTipWL = worldFromSimLocal(simTipLocalL);
+      const simTipWR = worldFromSimLocal(simTipLocalR);
+
+      // map tips into pallet local
+      const l1 = simTipWL.clone(); pallet.worldToLocal(l1);
+      const l2 = simTipWR.clone(); pallet.worldToLocal(l2);
+
+      const pockets = pallet.userData.pockets;
+      const entryX = pallet.userData.pocketEntryX;
+      const tol = pallet.userData.pocketTol;
+
+      // angle error: pallet direction vs forklift yaw
+      const angErr = Math.abs(normalizeAngle(pallet.rotation.y - simYaw));
+
+      // choose best pairing (swap) to minimize total
+      const pairCost = (a, b, pa, pb) => {
+        const ex = Math.abs(a.x - pa.x) + Math.abs(b.x - pb.x);
+        const ez = Math.abs(a.z - pa.z) + Math.abs(b.z - pb.z);
+        const ey = Math.abs(a.y - pa.y) + Math.abs(b.y - pb.y);
+        return { ex, ey, ez, sum: ex * 1.0 + ez * 1.5 + ey * 1.2 };
+      };
+
+      const c1 = pairCost(l1, l2, pockets[0], pockets[1]);
+      const c2 = pairCost(l1, l2, pockets[1], pockets[0]);
+      const bestPair = c1.sum <= c2.sum ? c1 : c2;
+
+      // extra penalty: tips should be on entry side (approach from -X). If too deep behind entry, penalize.
+      const entryPenalty = (
+        (l1.x < entryX - 0.10 ? (entryX - 0.10 - l1.x) : 0) +
+        (l2.x < entryX - 0.10 ? (entryX - 0.10 - l2.x) : 0)
+      ) * 8.0;
+
+      // soft penalty if too far ahead (not yet inserted enough)
+      const aheadPenalty = (
+        (l1.x > pockets[0].x + 0.22 ? (l1.x - (pockets[0].x + 0.22)) : 0) +
+        (l2.x > pockets[1].x + 0.22 ? (l2.x - (pockets[1].x + 0.22)) : 0)
+      ) * 4.0;
+
+      // score combine
+      const score =
+        bestPair.sum +
+        angErr * 2.2 +
+        entryPenalty +
+        aheadPenalty;
+
+      // derive "main errors" for UI (approx)
+      const longErr = bestPair.ex * 0.5;
+      const latErr = bestPair.ez * 0.5;
+      const hErr = bestPair.ey * 0.5;
+
+      // aligned condition
+      const aligned =
+        angErr < 0.05 &&
+        longErr < tol.x &&
+        latErr < tol.z &&
+        hErr < tol.y;
+
+      return { score, angErr, longErr, latErr, hErr, aligned };
+    }
+
+    updateFriction() {
+      const pos = this.fl.root.position;
+      const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+      this.friction = dist > 40 ? 0.7 : 1.0;
+    }
+
+    calcTipRisk() {
+      if (!this.target?.userData?.carried) {
+        this.tipRisk = 0;
+        return;
+      }
+      const liftFactor = this.liftY / liftMax;
+      const tiltFactor = Math.abs(this.tiltZ) / tiltMax;
+      const speedFactor = Math.abs(this.speed) / 5;
+      const weightFactor = (this.target.userData.weight || 200) / 400;
+
+      this.tipRisk = clamp(liftFactor * 0.4 + tiltFactor * 0.25 + speedFactor * 0.2 + weightFactor * 0.15, 0, 1);
+      this.warningLevel = this.tipRisk > 0.7 ? 2 : this.tipRisk > 0.4 ? 1 : 0;
+    }
+
+    // ===== 6-action selection: evaluate one-step best action by score improvement =====
+    chooseBestSearchAction(dt) {
+      const p = this.target;
+      if (!p) return 'NONE';
+
+      const pos = this.fl.root.position;
+      const yaw = this.yaw;
+
+      const base = this.computeHoleScore(p, pos, yaw, this.sideShiftZ, this.liftY, this.tiltZ);
+      this.holeScore = base.score;
+      this.holeAngErr = base.angErr;
+      this.holeLongErr = base.longErr;
+      this.holeLatErr = base.latErr;
+      this.holeHeightErr = base.hErr;
+
+      if (base.aligned) return 'DONE';
+
+      // simulation step sizes (per action)
+      const moveStep = 0.55 * this.friction;     // m/s
+      const strafeStep = 0.45;                   // m/s (micro lateral reposition)
+      const rotStep = THREE.MathUtils.degToRad(42); // rad/s
+
+      const simulate = (action) => {
+        let simPos = pos.clone();
+        let simYaw = yaw;
+        let simSide = this.sideShiftZ;
+        let simLift = this.liftY;
+        let simTilt = this.tiltZ;
+
+        const fwd = forwardFromYaw(simYaw);
+        const right = rightFromYaw(simYaw);
+
+        if (action === 'FWD') simPos.addScaledVector(fwd, moveStep * dt);
+        else if (action === 'REV') simPos.addScaledVector(fwd, -moveStep * dt);
+        else if (action === 'LFT') simPos.addScaledVector(right, -strafeStep * dt);
+        else if (action === 'RGT') simPos.addScaledVector(right, strafeStep * dt);
+        else if (action === 'ROT_L') simYaw += rotStep * dt;
+        else if (action === 'ROT_R') simYaw -= rotStep * dt;
+
+        // keep forklift away from direct collisions during sim
+        if (action === 'FWD' || action === 'REV' || action === 'LFT' || action === 'RGT') {
+          if (this.checkCollision(simPos)) return { action, score: base.score + 999, simPos, simYaw };
+        }
+
+        const s = this.computeHoleScore(p, simPos, simYaw, simSide, simLift, simTilt);
+        // small bias: prefer reducing angle first when angle is big
+        const angleBias = base.angErr > 0.18 ? (s.angErr * 1.5) : 0;
+        return { action, score: s.score + angleBias, simPos, simYaw, aligned: s.aligned };
+      };
+
+      const actions = ['ROT_L', 'ROT_R', 'LFT', 'RGT', 'FWD', 'REV'];
+      let best = null;
+
+      for (const a of actions) {
+        const r = simulate(a);
+        if (!best || r.score < best.score) best = r;
+      }
+
+      // if front sensor says imminent collision with other pallet, discourage FWD
+      if (this.sensorHit && this.sensorDist < 0.8 && best.action === 'FWD') {
+        // force turn or reverse
+        const r1 = simulate('ROT_L');
+        const r2 = simulate('ROT_R');
+        const r3 = simulate('REV');
+        best = [r1, r2, r3].sort((aa, bb) => aa.score - bb.score)[0];
+      }
+
+      return best ? best.action : 'NONE';
+    }
+
+    applySearchAction(dt, action) {
+      const pos = this.fl.root.position;
+      const fwd = forwardFromYaw(this.yaw);
+      const right = rightFromYaw(this.yaw);
+
+      const moveV = 0.55 * this.friction;
+      const strafeV = 0.45;
+      const rotV = THREE.MathUtils.degToRad(42);
+
+      this.steer = 0;
+
+      if (action === 'FWD') {
+        const np = pos.clone().addScaledVector(fwd, moveV * dt);
+        if (!this.checkCollision(np)) pos.copy(np);
+      } else if (action === 'REV') {
+        const np = pos.clone().addScaledVector(fwd, -moveV * dt);
+        if (!this.checkCollision(np)) pos.copy(np);
+      } else if (action === 'LFT') {
+        const np = pos.clone().addScaledVector(right, -strafeV * dt);
+        if (!this.checkCollision(np)) pos.copy(np);
+      } else if (action === 'RGT') {
+        const np = pos.clone().addScaledVector(right, strafeV * dt);
+        if (!this.checkCollision(np)) pos.copy(np);
+      } else if (action === 'ROT_L') {
+        this.yaw += rotV * dt;
+      } else if (action === 'ROT_R') {
+        this.yaw -= rotV * dt;
+      }
+    }
+
+    update(dt) {
+      const pos = this.fl.root.position;
+      const wheelbase = 1.80;
+      const maxSteer = THREE.MathUtils.degToRad(28);
+
+      this.updateFriction();
+      this.calcTipRisk();
+      this.sensePalletAhead();
+
+      const maxSpeed = this.target?.userData?.carried ? 2.5 * this.friction : 4.0 * this.friction;
+      const safeSpeed = this.tipRisk > 0.5 ? maxSpeed * 0.5 : maxSpeed;
+
+      // ===== STATES =====
+      if (this.state === 'IDLE') {
+        this.timer += dt;
+        this.speed *= 0.95;
+
+        if (this.timer > 0.5 + Math.random() * 0.5) {
+          this.target = this.findNearestPallet();
+          if (this.target) {
+            this.dropZone = this.getDropZone();
+            this.setState('APPROACH');
+            this.liftTarget = 0.10;
+            this.tiltTarget = 0;
+            this.sideShiftTarget = 0;
+          }
+        }
+      }
+
+      else if (this.state === 'APPROACH') {
+        const tgt = this.target.position.clone();
+        const palletDir = this.target.rotation.y;
+        const approachDist = 4.0;
+        tgt.x -= Math.cos(palletDir) * approachDist;
+        tgt.z += Math.sin(palletDir) * approachDist;
+
+        const dx = tgt.x - pos.x;
+        const dz = tgt.z - pos.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        let targetAng = Math.atan2(-dz, dx);
+        targetAng = this.avoidAngle(targetAng);
+
+        let angDiff = normalizeAngle(targetAng - this.yaw);
+        this.steer = clamp(angDiff * 1.5, -maxSteer, maxSteer);
+
+        if (dist > 0.9) {
+          this.speed = clamp(dist * 0.5, 0.5, safeSpeed);
+        } else {
+          this.speed = 0;
+          this.setState('SEARCH_HOLES');
+          this.liftTarget = 0.08;
+          this.tiltTarget = 0;
+          this.sideShiftTarget = 0;
+          this.forkSpread = this.target.userData.W * 0.25;
+          this.fl.forkL.position.z = this.forkSpread;
+          this.fl.forkR.position.z = -this.forkSpread;
+        }
+      }
+
+      else if (this.state === 'SEARCH_HOLES') {
+        // keep close, no continuous steering; use discrete actions
+        this.speed = 0;
+
+        // keep pockets visible only while searching
+        this.target.userData.pocketMarkers.visible = true;
+
+        // target lift to pocket band height (simple)
+        this.liftTarget = 0.12;
+        this.tiltTarget = 0;
+
+        // lock action for short bursts
+        this.searchLock -= dt;
+        if (this.searchLock <= 0) {
+          const a = this.chooseBestSearchAction(0.20);
+          if (a === 'DONE') {
+            this.setState('INSERT_FINAL');
+            this.searchAction = 'NONE';
+            this.searchLock = 0;
+          } else {
+            this.searchAction = a;
+            this.searchLock = 0.18;
+          }
+        }
+
+        if (this.searchAction !== 'NONE') {
+          this.applySearchAction(dt, this.searchAction);
+        }
+
+        // if aligned enough, advance
+        if (this.holeScore < 0.55 && this.holeAngErr < 0.06 && this.holeLatErr < 0.14 && this.holeHeightErr < 0.08) {
+          this.setState('INSERT_FINAL');
+        }
+      }
+
+      else if (this.state === 'INSERT_FINAL') {
+        // drive forward slowly to reach pocket inside X
+        this.target.userData.pocketMarkers.visible = true;
+
+        // keep angle corrected by discrete micro-rotation if needed
+        const angErr = Math.abs(normalizeAngle(this.target.rotation.y - this.yaw));
+        if (angErr > 0.07) {
+          this.applySearchAction(dt, normalizeAngle(this.target.rotation.y - this.yaw) > 0 ? 'ROT_L' : 'ROT_R');
+          this.speed = 0;
+        } else {
+          // forward creep
+          const creep = 0.55;
+          const fwd = forwardFromYaw(this.yaw);
+          const np = pos.clone().addScaledVector(fwd, creep * dt);
+          if (!this.checkCollision(np)) pos.copy(np);
+        }
+
+        // update score, if very good -> lift
+        const s = this.computeHoleScore(this.target, pos, this.yaw, this.sideShiftZ, this.liftY, this.tiltZ);
+        this.holeScore = s.score;
+        this.holeAngErr = s.angErr;
+        this.holeLongErr = s.longErr;
+        this.holeLatErr = s.latErr;
+        this.holeHeightErr = s.hErr;
+
+        // when close enough along X and angle OK -> lift
+        if (s.aligned && s.longErr < 0.08 && s.latErr < 0.10) {
+          this.setState('LIFT_UP');
+          this.liftTarget = 0.35;
+          this.tiltTarget = THREE.MathUtils.degToRad(-5);
+          this.target.userData.pocketMarkers.visible = false;
+        }
+      }
+
+      else if (this.state === 'LIFT_UP') {
+        this.timer += dt;
+        this.speed = 0;
+        if (this.timer > 1.0 && Math.abs(this.liftY - this.liftTarget) < 0.05) {
+          this.target.userData.carried = true;
+          this.setState('TILT_BACK');
+          this.tiltTarget = THREE.MathUtils.degToRad(5);
+          this.liftTarget = 0.7;
+          this.target.userData.pocketMarkers.visible = false;
+        }
+      }
+
+      else if (this.state === 'TILT_BACK') {
+        this.timer += dt;
+        if (this.timer > 0.8) {
+          this.setState('CARRY');
+        }
+      }
+
+      else if (this.state === 'CARRY') {
+        const dx = this.dropZone.x - pos.x;
+        const dz = this.dropZone.z - pos.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        let targetAng = Math.atan2(-dz, dx);
+        targetAng = this.avoidAngle(targetAng);
+
+        let angDiff = normalizeAngle(targetAng - this.yaw);
+        this.steer = clamp(angDiff * 1.5, -maxSteer, maxSteer);
+
+        if (dist > 1.5) {
+          this.speed = clamp(dist * 0.4, 0.3, safeSpeed);
+        } else {
+          this.setState('LOWER');
+          this.tiltTarget = 0;
+          this.liftTarget = 0.12;
+        }
+      }
+
+      else if (this.state === 'LOWER') {
+        this.timer += dt;
+        this.speed = 0;
+        if (this.timer > 1.5 && Math.abs(this.liftY - this.liftTarget) < 0.05) {
+          const r = this.yaw;
+          this.target.position.set(
+            pos.x + Math.cos(r) * 2.8,
+            this.target.userData.H / 2,
+            pos.z - Math.sin(r) * 2.8
+          );
+          this.target.rotation.y = r;
+          this.target.userData.carried = false;
+          this.setState('RETREAT');
+          this.liftTarget = 0.5;
+        }
+      }
+
+      else if (this.state === 'RETREAT') {
+        this.timer += dt;
+        const back = -1.2 * this.friction;
+        const fwd = forwardFromYaw(this.yaw);
+        const np = pos.clone().addScaledVector(fwd, back * dt);
+        if (!this.checkCollision(np)) pos.copy(np);
+
+        if (this.timer > 2.0) {
+          this.setState('IDLE');
+          this.target = null;
+          this.speed = 0;
+        }
+      }
+
+      // ===== carry pallet attach =====
+      if (this.target?.userData?.carried) {
+        const r = this.yaw;
+        const forkDist = 2.48;
+        this.target.position.set(
+          pos.x + Math.cos(r) * forkDist,
+          this.liftY + this.target.userData.H / 2 + 0.05,
+          pos.z - Math.sin(r) * forkDist
+        );
+        this.target.rotation.y = r;
+      }
+
+      // ===== lift/tilt/sideShift axes =====
+      {
+        const r = updateAxis(dt, this.tiltZ, this.tiltVel, this.tiltTarget, THREE.MathUtils.degToRad(80), THREE.MathUtils.degToRad(20));
+        this.tiltZ = r.now;
+        this.tiltVel = r.vel;
+        this.applyTilt();
+      }
+
+      {
+        const dynMin = requiredLiftMin(this.tiltZ);
+        this.liftTarget = clamp(this.liftTarget, dynMin, liftMax);
+        const r = updateAxis(dt, this.liftY, this.liftVel, this.liftTarget, 1.5, 0.6);
+        this.liftY = r.now;
+        this.liftVel = r.vel;
+        this.applyLift();
+      }
+
+      {
+        const r = updateAxis(dt, this.sideShiftZ, this.sideShiftVel, this.sideShiftTarget, 1.8, 0.9);
+        this.sideShiftZ = r.now;
+        this.sideShiftVel = r.vel;
+        this.applySideShift();
+      }
+
+      rebuildHoses(this.fl, this.liftY);
+
+      // ===== steering visualization =====
+      this.fl.steerPivots.l.rotation.y = this.steer;
+      this.fl.steerPivots.r.rotation.y = this.steer;
+
+      // ===== kinematics (only in APPROACH/CARRY) =====
+      if (this.state === 'APPROACH' || this.state === 'CARRY') {
+        const v = this.speed;
+        const omega = Math.abs(this.steer) > 0.001 ? (v * Math.tan(this.steer) / wheelbase) : 0;
+        this.yaw += omega * dt;
+
+        const prevPos = pos.clone();
+        const newPos = pos.clone();
+        newPos.x += Math.cos(this.yaw) * v * dt;
+        newPos.z -= Math.sin(this.yaw) * v * dt;
+
+        if (!this.checkCollision(newPos)) {
+          pos.copy(newPos);
+        } else {
+          this.speed *= 0.3;
+        }
+
+        const moved = pos.distanceTo(prevPos);
+        const sign = v >= 0 ? 1 : -1;
+        const rF = this.fl.wheels.fl.userData.radius;
+        const rR = this.fl.wheels.rl.userData.radius;
+
+        this.rollFront += sign * (moved / rF);
+        this.rollRear += sign * (moved / rR);
+
+        this.fl.wheels.fl.rotation.z = this.rollFront;
+        this.fl.wheels.fr.rotation.z = this.rollFront;
+        this.fl.wheels.rl.rotation.z = this.rollRear;
+        this.fl.wheels.rr.rotation.z = this.rollRear;
+
+        if (Math.abs(v) > 0.3 && Math.random() < 0.08) {
+          dust.emit(pos.x - Math.cos(this.yaw) * 1.2, 0.05, pos.z + Math.sin(this.yaw) * 1.2, 2);
+        }
+
+        if (Math.abs(v) > 0.5 && Math.random() < 0.1) {
+          exhaust.emit(pos.x - Math.cos(this.yaw) * 1.5, 0.6, pos.z + Math.sin(this.yaw) * 1.5);
+        }
+      } else {
+        // still rotate wheels slowly when doing micro actions
+        const moved = 0.0;
+        const rF = this.fl.wheels.fl.userData.radius;
+        const rR = this.fl.wheels.rl.userData.radius;
+        this.fl.wheels.fl.rotation.z = this.rollFront;
+        this.fl.wheels.fr.rotation.z = this.rollFront;
+        this.fl.wheels.rl.rotation.z = this.rollRear;
+        this.fl.wheels.rr.rotation.z = this.rollRear;
+      }
+
+      // ===== reverse lights =====
+      const isReversing = (this.state === 'RETREAT') || (this.speed < -0.1);
+      this.fl.revMat.emissive = new THREE.Color(isReversing ? 0xff2222 : 0x000000);
+      this.fl.revMat.emissiveIntensity = isReversing ? 0.8 : 0;
+
+      // ===== engine sound =====
+      if (this.engineSound && audioCtx) {
+        const rpm = 45 + Math.abs(this.speed) * 12 + Math.abs(this.liftVel) * 30;
+        this.engineSound.osc.frequency.value = rpm;
+        this.engineSound.gain.gain.value = 0.015 + Math.abs(this.speed) * 0.006;
+      }
+
+      // ===== apply root rotation =====
+      this.fl.root.rotation.y = this.yaw;
+
+      // ===== sensor box feedback =====
+      if (this.fl.sensor.box && this.fl.sensor.light) {
+        const box = this.fl.sensor.box;
+        const light = this.fl.sensor.light;
+
+        if (this.state === 'SEARCH_HOLES' || this.state === 'INSERT_FINAL') {
+          const close = this.holeScore < 0.55;
+          const good = this.holeScore < 0.35 && this.holeAngErr < 0.05 && this.holeLatErr < 0.10;
+          box.material.color.setHex(good ? 0x66ffcc : (close ? 0xffcc33 : 0x00ff66));
+          box.material.opacity = good ? 0.26 : (close ? 0.22 : 0.16);
+          light.color.setHex(good ? 0x66ffcc : (close ? 0xffcc33 : 0x00ff66));
+          light.intensity = good ? 1.05 : (close ? 0.75 : 0.35);
+        }
+      }
+    }
+
+    getInfo() {
+      const warnClass = this.warningLevel === 2 ? 'danger' : this.warningLevel === 1 ? 'warn' : '';
+      const holeClass = this.holeScore < 0.35 ? 'ok' : (this.holeScore < 0.70 ? 'warn' : '');
+      const holeTxt = isFinite(this.holeScore) ? this.holeScore.toFixed(2) : '--';
+      const angTxt = isFinite(this.holeAngErr) ? (this.holeAngErr * 57.2958).toFixed(1) : '--';
+      const latTxt = isFinite(this.holeLatErr) ? this.holeLatErr.toFixed(2) : '--';
+      const longTxt = isFinite(this.holeLongErr) ? this.holeLongErr.toFixed(2) : '--';
+      const sTxt = this.sensorHit ? `${this.sensorDist.toFixed(2)}m` : '--';
+
+      return `
+        <div>FL${this.id}: <span class="${warnClass}">${this.state}</span> | Tip:${(this.tipRisk * 100).toFixed(0)}%</div>
+        <div>FrontSensor: ${sTxt} | Action: ${this.searchAction}</div>
+        <div>HoleScore: <span class="${holeClass}">${holeTxt}</span> | ang:${angTxt}° lat:${latTxt} long:${longTxt}</div>
+      `;
+    }
+  }
+
+  const fl1 = createForklift(0xffb000);
+  fl1.root.position.set(-6, 0, 6);
+
+  const aiList = [
+    new ForkliftAI(fl1, 1),
+  ];
+  aiList[0].yaw = 0;
+
+  const clock = new THREE.Clock();
+  const infoEl = document.getElementById('info');
+
+  document.addEventListener('click', () => initAudio(), { once: true });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(0.05, clock.getDelta());
+    const t = clock.getElapsedTime();
+
+    aiList.forEach(ai => {
+      ai.update(dt);
+      ai.fl.beaconLight.intensity = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * 8 + ai.id * 2));
+    });
+
+    dust.update(dt);
+    exhaust.update(dt);
+
+    let info = '';
+    aiList.forEach(ai => info += ai.getInfo());
+    infoEl.innerHTML = info;
+
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+})();
+</script>
+</body>
+</html>
